@@ -61,7 +61,7 @@ export default function Home() {
           <div className="brandMark">PT</div>
           <div>
             <div className="title">Prime Technical Live Scanner</div>
-            <div className="sub">Full NSE F&amp;O universe • Upstox • 5-minute intraday</div>
+            <div className="sub">Nifty 500 universe • F&amp;O included • Upstox • 5-minute intraday</div>
           </div>
         </div>
         <div className="actions">
@@ -75,7 +75,7 @@ export default function Home() {
         <div className="card"><div className="label">Confirmed</div><div className="value green">{confirmed}</div></div>
         <div className="card"><div className="label">Setups</div><div className="value">{setups}</div></div>
         <div className="card"><div className="label">Watch</div><div className="value">{watch}</div></div>
-        <div className="card"><div className="label">F&amp;O Universe</div><div className="value">{universeSize || '—'}</div></div>
+        <div className="card"><div className="label">Nifty 500 Universe</div><div className="value">{universeSize || '—'}</div></div>
         <div className="card"><div className="label">Last update</div><div className="value" style={{ fontSize: 18 }}>{updated}</div></div>
       </section>
 
@@ -88,7 +88,7 @@ export default function Home() {
         <div className="panelHead">
           <div>
             <div className="panelTitle">Prime Technical Candidates</div>
-            <div className="sub">Level → Reaction → Candle → Volume → 20 EMA → Confirmation</div>
+            <div className="sub">Same Prime Technical engine → Level → Reaction → Candle → Volume → 20 EMA → Confirmation</div>
           </div>
           <div className="count">{candidates.length} CANDIDATES</div>
         </div>
@@ -124,7 +124,7 @@ export default function Home() {
         </div>
       </section>
 
-      <div className="footer">Upstox token server-side • Full F&amp;O universe • 5-minute candles • Auto refresh 60s • No order execution</div>
+      <div className="footer">Upstox token server-side • Nifty 500 cash-equity charts • F&amp;O + non-F&amp;O included • 5-minute candles • Auto refresh 60s • No order execution</div>
     </main>
   );
 }
