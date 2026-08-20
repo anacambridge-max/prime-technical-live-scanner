@@ -11,7 +11,6 @@ export const maxDuration = 60;
 let cachedResponse: { updatedAt: string; universeSize: number; rows: Awaited<ReturnType<typeof scanUniverse>> } | null = null;
 let inFlight: Promise<Awaited<ReturnType<typeof scanUniverse>>> | null = null;
 let inFlightUniverseSize = 0;
-let inFlightStartedAt = 0;
 const CACHE_MS = 45_000;
 
 export async function GET() {
@@ -23,7 +22,6 @@ export async function GET() {
     }
 
     if (!inFlight) {
-      inFlightStartedAt = now;
       inFlight = (async () => {
         const universe = await getPrimeUniverse();
         inFlightUniverseSize = universe.length;
@@ -33,11 +31,17 @@ export async function GET() {
 
     const rows = await inFlight;
     const universeSize = inFlightUniverseSize;
-    const updatedAt = new Date().toISOString();
 
+    // A successful scan must contain at least one instrument. An all-empty
+    // result is almost always an upstream/rate-limit/data failure and must not
+    // replace the last good scan on the dashboard.
+    if (!rows.length) {
+      throw new Error('Upstox returned no usable 5-minute candles. Retrying without replacing the last scan.');
+    }
+
+    const updatedAt = new Date().toISOString();
     cachedResponse = { updatedAt, universeSize, rows };
     inFlight = null;
-    inFlightStartedAt = 0;
 
     return NextResponse.json({ status: 'success', updatedAt, universeSize, rows, cached: false });
   } catch (error) {
