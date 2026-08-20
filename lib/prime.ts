@@ -81,7 +81,9 @@ function rowFromCandles(symbol:string,candles:Candle[],daily:DailyQuote|undefine
   const orHigh=opening?.[2]??NaN;
   const orLow=opening?.[3]??NaN;
 
-  // SETUP is a current candle state. Do not carry an old setup forward.
+  // Only the latest closed candle may create a live SETUP.
+  // A CONFIRMED signal requires the immediately preceding candle to be the setup candle.
+  // Most importantly, a setup candle MUST interact with PDH/PDL, OR high/low, or fake-break those levels.
   const latestBody=bodyPct(latest);
   const prevBody=previous?bodyPct(previous):0;
   const latestBull=latest[4]>latest[1]&&latestBody>=55;
@@ -89,19 +91,30 @@ function rowFromCandles(symbol:string,candles:Candle[],daily:DailyQuote|undefine
   const prevBull=previous?previous[4]>previous[1]&&prevBody>=50:false;
   const prevBear=previous?previous[4]<previous[1]&&prevBody>=50:false;
 
-  const pdhBreak=Number.isFinite(yh)&&crossedAbove(latest,yh);
-  const pdlBreak=Number.isFinite(yl)&&crossedBelow(latest,yl);
-  const orBreakBull=Number.isFinite(orHigh)&&crossedAbove(latest,orHigh);
-  const orBreakBear=Number.isFinite(orLow)&&crossedBelow(latest,orLow);
-  const fakeBreakdown=Number.isFinite(yl)&&latest[3]<yl&&latest[4]>yl;
-  const fakeBreakout=Number.isFinite(yh)&&latest[2]>yh&&latest[4]<yh;
+  const latestPdhBreak=Number.isFinite(yh)&&crossedAbove(latest,yh);
+  const latestPdlBreak=Number.isFinite(yl)&&crossedBelow(latest,yl);
+  const latestOrBull=Number.isFinite(orHigh)&&crossedAbove(latest,orHigh);
+  const latestOrBear=Number.isFinite(orLow)&&crossedBelow(latest,orLow);
+  const latestFakeDown=Number.isFinite(yl)&&latest[3]<yl&&latest[4]>yl;
+  const latestFakeUp=Number.isFinite(yh)&&latest[2]>yh&&latest[4]<yh;
 
-  const latestLongSetup=latestBull&&latestVol>=1.5&&latest[4]>ema20&&emaBull;
-  const latestShortSetup=latestBear&&latestVol>=1.5&&latest[4]<ema20&&emaBear;
+  const prevPdhBreak=!!previous&&Number.isFinite(yh)&&crossedAbove(previous,yh);
+  const prevPdlBreak=!!previous&&Number.isFinite(yl)&&crossedBelow(previous,yl);
+  const prevOrBull=!!previous&&Number.isFinite(orHigh)&&crossedAbove(previous,orHigh);
+  const prevOrBear=!!previous&&Number.isFinite(orLow)&&crossedBelow(previous,orLow);
+  const prevFakeDown=!!previous&&Number.isFinite(yl)&&previous![3]<yl&&previous![4]>yl;
+  const prevFakeUp=!!previous&&Number.isFinite(yh)&&previous![2]>yh&&previous![4]<yh;
 
-  // Confirmation must be the immediately following candle.
-  const prevLongSetup=!!previous&&prevBull&&previousVol>=1.5&&previous![4]>ema20&&emaBull;
-  const prevShortSetup=!!previous&&prevBear&&previousVol>=1.5&&previous![4]<ema20&&emaBear;
+  const latestLongInteraction=latestPdhBreak||latestOrBull||latestFakeDown;
+  const latestShortInteraction=latestPdlBreak||latestOrBear||latestFakeUp;
+  const prevLongInteraction=prevPdhBreak||prevOrBull||prevFakeDown;
+  const prevShortInteraction=prevPdlBreak||prevOrBear||prevFakeUp;
+
+  const latestLongSetup=latestBull&&latestLongInteraction&&latestVol>=1.5&&latest[4]>ema20&&emaBull;
+  const latestShortSetup=latestBear&&latestShortInteraction&&latestVol>=1.5&&latest[4]<ema20&&emaBear;
+
+  const prevLongSetup=!!previous&&prevBull&&prevLongInteraction&&previousVol>=1.5&&previous![4]>ema20&&emaBull;
+  const prevShortSetup=!!previous&&prevBear&&prevShortInteraction&&previousVol>=1.5&&previous![4]<ema20&&emaBear;
   const longConfirmed=prevLongSetup&&latestBull&&latest[4]>previous![2]&&latestVol>=2&&latest[4]>ema20;
   const shortConfirmed=prevShortSetup&&latestBear&&latest[4]<previous![3]&&latestVol>=2&&latest[4]<ema20;
 
@@ -112,31 +125,31 @@ function rowFromCandles(symbol:string,candles:Candle[],daily:DailyQuote|undefine
   let signalTime:string|null=null;
 
   if(longConfirmed){
-    setup=pdhBreak?'PDH BREAKOUT':orBreakBull?'OR BREAKOUT':fakeBreakdown?'FAKE BREAKDOWN':'BUY SETUP';
+    setup=prevPdhBreak?'PDH BREAKOUT':prevOrBull?'OR BREAKOUT':prevFakeDown?'FAKE BREAKDOWN':'LEVEL BREAKOUT';
     status='CONFIRMED'; entry=latest[2]; sl=Math.min(previous![3],latest[3]);
     const risk=entry-sl; if(risk>0&&risk/entry<=0.02) target=entry+risk*2;
-    reason=`${setup} + confirmation candle + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + 20 EMA`;
+    reason=`${setup} + current confirmation candle + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + 20 EMA`;
     signalTime=latest[0];
   } else if(shortConfirmed){
-    setup=pdlBreak?'PDL BREAKDOWN':orBreakBear?'OR BREAKDOWN':fakeBreakout?'FAKE BREAKOUT':'SELL SETUP';
+    setup=prevPdlBreak?'PDL BREAKDOWN':prevOrBear?'OR BREAKDOWN':prevFakeUp?'FAKE BREAKOUT':'LEVEL BREAKDOWN';
     status='CONFIRMED'; entry=latest[3]; sl=Math.max(previous![2],latest[2]);
     const risk=sl-entry; if(risk>0&&risk/entry<=0.02) target=entry-risk*2;
-    reason=`${setup} + confirmation candle + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + 20 EMA`;
+    reason=`${setup} + current confirmation candle + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + 20 EMA`;
     signalTime=latest[0];
   } else if(latestLongSetup){
-    setup=pdhBreak?'PDH BREAKOUT':orBreakBull?'OR BREAKOUT':fakeBreakdown?'FAKE BREAKDOWN':'BUY SETUP';
+    setup=latestPdhBreak?'PDH BREAKOUT':latestOrBull?'OR BREAKOUT':latestFakeDown?'FAKE BREAKDOWN':'LEVEL BREAKOUT';
     status='SETUP'; entry=latest[2]; sl=Math.min(latest[3],previous?.[3]??latest[3]);
-    reason=`${setup} + bullish setup candle + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + 20 EMA; confirmation pending`;
+    reason=`${setup} + current bullish setup candle + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + 20 EMA; confirmation pending`;
     signalTime=latest[0];
   } else if(latestShortSetup){
-    setup=pdlBreak?'PDL BREAKDOWN':orBreakBear?'OR BREAKDOWN':fakeBreakout?'FAKE BREAKOUT':'SELL SETUP';
+    setup=latestPdlBreak?'PDL BREAKDOWN':latestOrBear?'OR BREAKDOWN':latestFakeUp?'FAKE BREAKOUT':'LEVEL BREAKDOWN';
     status='SETUP'; entry=latest[3]; sl=Math.max(latest[2],previous?.[2]??latest[2]);
-    reason=`${setup} + bearish setup candle + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + 20 EMA; confirmation pending`;
+    reason=`${setup} + current bearish setup candle + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + 20 EMA; confirmation pending`;
     signalTime=latest[0];
   } else if(current>=ema20&&emaBull&&latestVol>=1.0){
-    status='WATCH'; setup='BUY WATCH'; reason='Bullish trend above 20 EMA; setup/volume confirmation pending';
+    status='WATCH'; setup='BUY WATCH'; reason='Above rising 20 EMA; waiting for PDH/OR breakout setup';
   } else if(current<ema20&&emaBear&&latestVol>=1.0){
-    status='WATCH'; setup='SELL WATCH'; reason='Bearish trend below 20 EMA; setup/volume confirmation pending';
+    status='WATCH'; setup='SELL WATCH'; reason='Below falling 20 EMA; waiting for PDL/OR breakdown setup';
   }
 
   return {symbol,ltp:current,change,volumeX:latestVol,ema:Number.isFinite(ema20)?(current>=ema20?'BULLISH':'BEARISH'):'—',level,setup,status,entry,sl,target,reason,signalTime};
