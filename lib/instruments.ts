@@ -17,71 +17,79 @@ type UpstoxInstrument = {
 };
 
 const NSE_FILE = 'https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz';
+const NIFTY_500_FILE = 'https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv';
 
 let cachedUniverse: PrimeInstrument[] | null = null;
 let cachedAt = 0;
 
-export async function getPrimeUniverse(): Promise<PrimeInstrument[]> {
-  const configured = process.env.PRIME_SYMBOLS?.split(',').map(s => s.trim()).filter(Boolean);
-  if (configured?.length) {
-    return configured.map(symbol => ({ symbol, instrumentKey: symbol }));
-  }
+function parseCsvSymbols(csv: string) {
+  const lines = csv.replace(/^\uFEFF/, '').split(/\r?\n/).filter(Boolean);
+  if (!lines.length) return new Set<string>();
 
+  const headers = lines[0].split(',').map(x => x.trim().replace(/^"|"$/g, '').toLowerCase());
+  const symbolIndex = headers.findIndex(x => x === 'symbol');
+  if (symbolIndex < 0) throw new Error('Nifty 500 constituent file has no Symbol column');
+
+  const symbols = new Set<string>();
+  for (const line of lines.slice(1)) {
+    const cells = line.split(',').map(x => x.trim().replace(/^"|"$/g, ''));
+    const symbol = cells[symbolIndex]?.trim();
+    if (symbol) symbols.add(symbol.toUpperCase());
+  }
+  return symbols;
+}
+
+export async function getPrimeUniverse(): Promise<PrimeInstrument[]> {
   const now = Date.now();
   if (cachedUniverse && now - cachedAt < 6 * 60 * 60 * 1000) return cachedUniverse;
 
-  const res = await fetch(NSE_FILE, { cache: 'no-store' });
-  if (!res.ok) throw new Error(`Unable to download Upstox NSE instruments: ${res.status}`);
+  const [nseRes, indexRes] = await Promise.all([
+    fetch(NSE_FILE, { cache: 'no-store' }),
+    fetch(NIFTY_500_FILE, { cache: 'no-store' }),
+  ]);
 
-  const bytes = Buffer.from(await res.arrayBuffer());
+  if (!nseRes.ok) throw new Error(`Unable to download Upstox NSE instruments: ${nseRes.status}`);
+  if (!indexRes.ok) throw new Error(`Unable to download Nifty 500 constituents: ${indexRes.status}`);
+
+  const [nseBytes, indexCsv] = await Promise.all([
+    nseRes.arrayBuffer(),
+    indexRes.text(),
+  ]);
+
+  const bytes = Buffer.from(nseBytes);
   const raw = bytes[0] === 0x1f && bytes[1] === 0x8b
     ? gunzipSync(bytes).toString('utf8')
     : bytes.toString('utf8');
   const instruments = JSON.parse(raw) as UpstoxInstrument[];
+  const nifty500 = parseCsvSymbols(indexCsv);
 
-  const today = Date.now();
-  const nearestFuture = new Map<string, UpstoxInstrument>();
-  const equities = new Set<string>();
-
+  const equities = new Map<string, string>();
   for (const item of instruments) {
-    if (item.segment === 'NSE_EQ' && item.instrument_type === 'EQ' && item.instrument_key) {
-      equities.add(item.instrument_key);
-    }
-
     if (
-      item.segment === 'NSE_FO' &&
-      item.instrument_type === 'FUT' &&
-      item.underlying_type === 'EQUITY' &&
-      item.underlying_key &&
-      item.underlying_symbol &&
-      item.expiry &&
-      item.expiry >= today
+      item.segment === 'NSE_EQ' &&
+      item.instrument_type === 'EQ' &&
+      item.instrument_key &&
+      item.trading_symbol
     ) {
-      const previous = nearestFuture.get(item.underlying_key);
-      if (!previous || (previous.expiry ?? Number.MAX_SAFE_INTEGER) > item.expiry) {
-        nearestFuture.set(item.underlying_key, item);
-      }
+      equities.set(item.trading_symbol.toUpperCase(), item.instrument_key);
     }
   }
 
-  // Use the nearest active stock future as the F&O membership test, then scan
-  // the corresponding NSE cash instrument so LTP/levels/5-minute candles are
-  // based on the equity chart (the instrument actually traded by the scanner).
-  const universe = [...nearestFuture.entries()]
-    .map(([underlyingKey, future]) => ({
-      symbol: future.underlying_symbol as string,
-      instrumentKey: underlyingKey,
-    }))
-    .filter(item => equities.has(item.instrumentKey))
+  // Nifty 500 is the complete scan universe. F&O stocks are naturally included,
+  // while non-F&O Nifty 500 stocks are retained as well.
+  const universe = [...nifty500]
+    .map(symbol => {
+      const instrumentKey = equities.get(symbol);
+      return instrumentKey ? { symbol, instrumentKey } : null;
+    })
+    .filter((item): item is PrimeInstrument => item !== null)
     .sort((a, b) => a.symbol.localeCompare(b.symbol));
 
-  // The Upstox candle endpoint is per instrument. A very large universe can
-  // exceed a Vercel function's execution window, so keep a production-safe
-  // default while allowing the full universe to be enabled with an env var.
-  const configuredMax = Number(process.env.PRIME_MAX_SYMBOLS || 150);
-  const maxSymbols = Math.min(300, Math.max(50, configuredMax));
+  if (universe.length < 450) {
+    throw new Error(`Nifty 500 universe mapping incomplete: only ${universe.length} stocks matched Upstox NSE equities`);
+  }
 
-  cachedUniverse = universe.slice(0, maxSymbols);
+  cachedUniverse = universe;
   cachedAt = now;
   return cachedUniverse;
 }
