@@ -102,7 +102,7 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
   const r3 = Number.isFinite(pp) ? yh + 2 * (pp - yl) : NaN;
   const s3 = Number.isFinite(pp) ? yl - 2 * (yh - pp) : NaN;
 
-  const levels: Record<string, number> = { YH: yh, YL: yl, MID: mid, R1: r1, R2: r2, R3: r3, S1: s1, S2: s2, S3: s3 };
+  const levels: Record<string, number> = { PDH: yh, PDL: yl, MID: mid, R1: r1, R2: r2, R3: r3, S1: s1, S2: s2, S3: s3 };
   const level = nearestLevel(current, levels);
 
   let status: ScanRow['status'] = 'NO TRADE';
@@ -136,20 +136,22 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
     const touchedBear = levelValues.find(([, v]) => crossedBelow(c, v));
     const fakeBreakdown = Number.isFinite(yl) && c[3] < yl && c[4] > yl;
     const fakeBreakout = Number.isFinite(yh) && c[2] > yh && c[4] < yh;
+    const pdhBreakout = Number.isFinite(yh) && crossedAbove(c, yh);
+    const pdlBreakdown = Number.isFinite(yl) && crossedBelow(c, yl);
     const orBreakBull = Number.isFinite(orHigh) && crossedAbove(c, orHigh);
     const orBreakBear = Number.isFinite(orLow) && crossedBelow(c, orLow);
 
-    const longInteraction = Boolean(touchedBull || fakeBreakdown || orBreakBull);
-    const shortInteraction = Boolean(touchedBear || fakeBreakout || orBreakBear);
+    const longInteraction = Boolean(pdhBreakout || touchedBull || fakeBreakdown || orBreakBull);
+    const shortInteraction = Boolean(pdlBreakdown || touchedBear || fakeBreakout || orBreakBear);
     const longSetup = bull && longInteraction && cVol >= 1.5 && c[4] > ema20 && emaBull;
     const shortSetup = bear && shortInteraction && cVol >= 1.5 && c[4] < ema20 && emaBear;
 
     if (longSetup) {
-      setup = fakeBreakdown ? 'FAKE BREAKDOWN' : orBreakBull ? 'OR BREAKOUT' : 'LEVEL REACTION';
+      setup = pdhBreakout ? 'PDH BREAKOUT' : fakeBreakdown ? 'FAKE BREAKDOWN' : orBreakBull ? 'OR BREAKOUT' : 'LEVEL REACTION';
       status = 'SETUP';
       reason = `${setup} + bullish candle + ${cVol.toFixed(1)}X ${cVolLabel} + 20 EMA`;
       entry = c[2];
-      sl = fakeBreakdown ? c[3] : Math.min(c[3], previous?.[3] ?? c[3]);
+      sl = pdhBreakout ? Math.min(c[3], yh) : fakeBreakdown ? c[3] : Math.min(c[3], previous?.[3] ?? c[3]);
 
       const nBody = bodyPct(n);
       const nBull = n[4] > n[1] && nBody >= 50;
@@ -158,7 +160,7 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
         const risk = n[2] - sl;
         if (risk > 0 && risk / n[2] <= 0.02) {
           status = 'CONFIRMED';
-          reason = `Setup + confirmation candle + ${nVol.toFixed(1)}X ${volumeLabel(nVol)} + 20 EMA`;
+          reason = `${setup} + confirmation candle + ${nVol.toFixed(1)}X ${volumeLabel(nVol)} + 20 EMA`;
           entry = n[2];
           target = entry + risk * 2;
           signalTime = n[0];
@@ -167,11 +169,11 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
     }
 
     if (shortSetup) {
-      setup = fakeBreakout ? 'FAKE BREAKOUT' : orBreakBear ? 'OR BREAKDOWN' : 'LEVEL REJECTION';
+      setup = pdlBreakdown ? 'PDL BREAKDOWN' : fakeBreakout ? 'FAKE BREAKOUT' : orBreakBear ? 'OR BREAKDOWN' : 'LEVEL REJECTION';
       status = 'SETUP';
       reason = `${setup} + bearish candle + ${cVol.toFixed(1)}X ${cVolLabel} + 20 EMA`;
       entry = c[3];
-      sl = fakeBreakout ? c[2] : Math.max(c[2], previous?.[2] ?? c[2]);
+      sl = pdlBreakdown ? Math.max(c[2], yl) : fakeBreakout ? c[2] : Math.max(c[2], previous?.[2] ?? c[2]);
 
       const nBody = bodyPct(n);
       const nBear = n[4] < n[1] && nBody >= 50;
@@ -180,7 +182,7 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
         const risk = sl - n[3];
         if (risk > 0 && risk / n[3] <= 0.02) {
           status = 'CONFIRMED';
-          reason = `Setup + confirmation candle + ${nVol.toFixed(1)}X ${volumeLabel(nVol)} + 20 EMA`;
+          reason = `${setup} + confirmation candle + ${nVol.toFixed(1)}X ${volumeLabel(nVol)} + 20 EMA`;
           entry = n[3];
           target = entry - risk * 2;
           signalTime = n[0];
@@ -196,11 +198,21 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
     const bull = last[4] > last[1] && lastBody >= 55;
     const bear = last[4] < last[1] && lastBody >= 55;
     const nearLevel = nearestLevel(last[4], levels, 0.0025);
+    const pdhBull = Number.isFinite(yh) && last[4] > yh;
+    const pdlBear = Number.isFinite(yl) && last[4] < yl;
     const orBull = Number.isFinite(orHigh) && last[4] > orHigh;
     const orBear = Number.isFinite(orLow) && last[4] < orLow;
     const lastVolLabel = volumeLabel(lastVol);
 
-    if (bull && nearLevel !== '—' && lastVol >= 1.5 && last[4] > ema20 && emaBull) {
+    if (bull && pdhBull && lastVol >= 1.5 && last[4] > ema20 && emaBull) {
+      status = 'WATCH';
+      setup = 'PDH BREAKOUT';
+      reason = `Price above PDH + ${lastVol.toFixed(1)}X ${lastVolLabel} + 20 EMA; confirmation pending`;
+    } else if (bear && pdlBear && lastVol >= 1.5 && last[4] < ema20 && emaBear) {
+      status = 'WATCH';
+      setup = 'PDL BREAKDOWN';
+      reason = `Price below PDL + ${lastVol.toFixed(1)}X ${lastVolLabel} + 20 EMA; confirmation pending`;
+    } else if (bull && nearLevel !== '—' && lastVol >= 1.5 && last[4] > ema20 && emaBull) {
       status = 'WATCH';
       setup = 'LEVEL SETUP';
       reason = `Strong bullish candle at ${nearLevel} + ${lastVol.toFixed(1)}X ${lastVolLabel}; confirmation pending`;
