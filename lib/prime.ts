@@ -38,7 +38,7 @@ function average(values: number[]) {
 
 function bodyPct(c: Candle) {
   const range = c[2] - c[3];
-  return range > 0 ? Math.abs(c[4] - c[1]) / range * 100 : 0;
+  return range > 0 ? (Math.abs(c[4] - c[1]) / range) * 100 : 0;
 }
 
 function trueRange(c: Candle, prevClose?: number) {
@@ -56,16 +56,25 @@ function atr(candles: Candle[], length = 14) {
   return average(ranges);
 }
 
-function nearLevel(price: number, level: number, tolerancePct = 0.0035) {
-  return Number.isFinite(level) && Math.abs(price - level) / Math.max(Math.abs(level), 1) <= tolerancePct;
-}
-
 function volumeLabel(x: number) {
   if (x >= 6) return 'EXTREME VOLUME';
   if (x >= 4) return 'VERY HIGH VOLUME';
   if (x >= 2) return 'HIGH VOLUME';
   if (x >= 1.5) return 'STRONG VOLUME';
   return 'NORMAL VOLUME';
+}
+
+function nearLevel(price: number, level: number, tolerancePct = 0.0035) {
+  return Number.isFinite(level) && Math.abs(price - level) / Math.max(Math.abs(level), 1) <= tolerancePct;
+}
+
+function indiaDate(timestamp: string) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(timestamp));
 }
 
 function nearestLevel(price: number, levels: Record<string, number>, tolerancePct = 0.002) {
@@ -83,52 +92,44 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   const now = Date.now();
   const closed = sorted.filter(c => new Date(c[0]).getTime() + 5 * 60 * 1000 <= now);
   const usable = closed.length >= 30 ? closed : sorted;
+
   const latest = usable[usable.length - 1];
   const previous = usable[usable.length - 2];
   const twoBarsAgo = usable[usable.length - 3];
+  if (!latest || !previous) {
+    return {
+      symbol, ltp: 0, change: 0, volumeX: 0, ema: '—', level: '—', setup: '—',
+      status: 'NO TRADE', entry: null, sl: null, target: null,
+      reason: 'Insufficient 5-minute candles', signalTime: null,
+    };
+  }
 
-  // Candle close is used for candle/volume calculations. Live LTP is used to
-  // decide whether a previously confirmed breakout is STILL valid right now.
   const candleClose = latest[4];
   const livePrice = Number.isFinite(daily?.last_price) ? daily!.last_price! : candleClose;
-  const current = candleClose;
-
   const closes = usable.map(c => c[4]);
   const volumes = usable.map(c => c[5]);
-  const prevClose = daily?.prev_ohlc?.close ?? previous?.[4] ?? current;
+  const prevClose = daily?.prev_ohlc?.close ?? previous[4] ?? candleClose;
   const change = prevClose ? ((livePrice - prevClose) / prevClose) * 100 : 0;
 
   const ema20 = ema(closes.slice(-60), 20);
   const ema20Prev = ema(closes.slice(-61, -1), 20);
-  const emaBull = Number.isFinite(ema20) && current > ema20;
-  const emaBear = Number.isFinite(ema20) && current < ema20;
+  const emaBull = Number.isFinite(ema20) && candleClose > ema20;
+  const emaBear = Number.isFinite(ema20) && candleClose < ema20;
   const emaRising = Number.isFinite(ema20) && Number.isFinite(ema20Prev) && ema20 >= ema20Prev;
   const emaFalling = Number.isFinite(ema20) && Number.isFinite(ema20Prev) && ema20 <= ema20Prev;
 
   const avgVol = average(volumes.slice(Math.max(0, volumes.length - 21), -1));
   const latestVol = avgVol > 0 ? latest[5] / avgVol : 0;
-  const previousVol = avgVol > 0 && previous ? previous[5] / avgVol : 0;
+  const previousVol = avgVol > 0 ? previous[5] / avgVol : 0;
 
-  // PDH / PDL from previous trading day.
-  const yh = daily?.prev_ohlc?.high ?? NaN;
-  const yl = daily?.prev_ohlc?.low ?? NaN;
-  const pc = prevClose;
-  const mid = Number.isFinite(yh) && Number.isFinite(yl) ? (yh + yl) / 2 : NaN;
-  const pp = Number.isFinite(yh) && Number.isFinite(yl) ? (yh + yl + pc) / 3 : NaN;
-  const levels = {
-    PDH: yh,
-    PDL: yl,
-    MID: mid,
-    R1: Number.isFinite(pp) ? 2 * pp - yl : NaN,
-    R2: Number.isFinite(pp) ? pp + (yh - yl) : NaN,
-    R3: Number.isFinite(pp) ? yh + 2 * (pp - yl) : NaN,
-    S1: Number.isFinite(pp) ? 2 * pp - yh : NaN,
-    S2: Number.isFinite(pp) ? pp - (yh - yl) : NaN,
-    S3: Number.isFinite(pp) ? yl - 2 * (yh - pp) : NaN,
-  };
-  const level = nearestLevel(livePrice, levels);
-
-  // First 5-minute candle of the NSE session = OR reference candle.
+  // ================================================================
+  // PRIME TECHNICAL KEY LEVELS
+  // PDH / PDL are the mandatory directional levels for CONFIRMATION.
+  // OR High / OR Low are kept as context, but can NEVER independently
+  // create a CONFIRMED signal.
+  // ================================================================
+  const pdh = daily?.prev_ohlc?.high ?? NaN;
+  const pdl = daily?.prev_ohlc?.low ?? NaN;
   const opening = usable.find(c => {
     const d = new Date(c[0]);
     return d.getUTCHours() === 3 && d.getUTCMinutes() === 45;
@@ -136,83 +137,99 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   const orHigh = opening?.[2] ?? NaN;
   const orLow = opening?.[3] ?? NaN;
 
-  const latestBody = bodyPct(latest);
-  const prevBody = previous ? bodyPct(previous) : 0;
-  const latestBull = latest[4] > latest[1] && latestBody >= 50;
-  const latestBear = latest[4] < latest[1] && latestBody >= 50;
-  const prevBull = !!previous && previous[4] > previous[1] && prevBody >= 45;
-  const prevBear = !!previous && previous[4] < previous[1] && prevBody >= 45;
+  const levels = { PDH: pdh, PDL: pdl, 'OR HIGH': orHigh, 'OR LOW': orLow };
+  const level = nearestLevel(livePrice, levels);
 
-  // Breakout/reaction candles.
-  const latestPdhBreak = Number.isFinite(yh) && latest[4] > yh && latest[1] <= yh;
-  const latestPdlBreak = Number.isFinite(yl) && latest[4] < yl && latest[1] >= yl;
-  const latestOrBreak = Number.isFinite(orHigh) && latest[4] > orHigh && latest[1] <= orHigh;
-  const latestOrDown = Number.isFinite(orLow) && latest[4] < orLow && latest[1] >= orLow;
-  const prevPdhBreak = !!previous && Number.isFinite(yh) && previous[4] > yh && previous[1] <= yh;
-  const prevPdlBreak = !!previous && Number.isFinite(yl) && previous[4] < yl && previous[1] >= yl;
-  const prevOrBreak = !!previous && Number.isFinite(orHigh) && previous[4] > orHigh && previous[1] <= orHigh;
-  const prevOrDown = !!previous && Number.isFinite(orLow) && previous[4] < orLow && previous[1] >= orLow;
+  const today = indiaDate(latest[0]);
+  const todayCandles = usable.filter(c => indiaDate(c[0]) === today);
 
-  const latestPdhReaction = Number.isFinite(yh) && latest[2] >= yh && latest[4] <= yh && nearLevel(latest[4], yh);
-  const latestPdlReaction = Number.isFinite(yl) && latest[3] <= yl && latest[4] >= yl && nearLevel(latest[4], yl);
-  const latestOrReaction = Number.isFinite(orHigh) && latest[2] >= orHigh && latest[4] <= orHigh && nearLevel(latest[4], orHigh);
-  const latestOrReject = Number.isFinite(orLow) && latest[3] <= orLow && latest[4] >= orLow && nearLevel(latest[4], orLow);
-  const prevPdhReaction = !!previous && Number.isFinite(yh) && previous[2] >= yh && previous[4] <= yh && nearLevel(previous[4], yh);
-  const prevPdlReaction = !!previous && Number.isFinite(yl) && previous[3] <= yl && previous[4] >= yl && nearLevel(previous[4], yl);
-  const prevOrReaction = !!previous && Number.isFinite(orHigh) && previous[2] >= orHigh && previous[4] <= orHigh && nearLevel(previous[4], orHigh);
-  const prevOrReject = !!previous && Number.isFinite(orLow) && previous[3] <= orLow && previous[4] >= orLow && nearLevel(previous[4], orLow);
+  // A valid PDH/PDL breakout means a CLOSED 5-minute candle closes beyond
+  // the previous day's level. A wick through the level is NOT enough.
+  const pdhBreakIndices: number[] = [];
+  const pdlBreakIndices: number[] = [];
+  todayCandles.forEach((c, i) => {
+    if (Number.isFinite(pdh) && c[4] > pdh && c[1] <= pdh) pdhBreakIndices.push(i);
+    if (Number.isFinite(pdl) && c[4] < pdl && c[1] >= pdl) pdlBreakIndices.push(i);
+  });
 
-  const prevLevelLong = prevBull && previousVol >= 1.5 && emaBull && (prevPdhBreak || prevOrBreak || prevPdhReaction || prevOrReaction);
-  const prevLevelShort = prevBear && previousVol >= 1.5 && emaBear && (prevPdlBreak || prevOrDown || prevPdlReaction || prevOrReject);
-  const latestLevelLong = latestBull && latestVol >= 1.5 && emaBull && (latestPdhBreak || latestOrBreak || latestPdhReaction || latestOrReaction);
-  const latestLevelShort = latestBear && latestVol >= 1.5 && emaBear && (latestPdlBreak || latestOrDown || latestPdlReaction || latestOrReject);
+  const lastPdhBreak = pdhBreakIndices.length ? pdhBreakIndices[pdhBreakIndices.length - 1] : -1;
+  const lastPdlBreak = pdlBreakIndices.length ? pdlBreakIndices[pdlBreakIndices.length - 1] : -1;
+  const latestTodayIndex = todayCandles.length - 1;
 
-  // 20 EMA continuation: impulse -> pullback/reaction -> follow-through.
+  // The breakout must be recent enough to be part of the current setup.
+  // Six 5-minute bars = 30 minutes. This prevents an old morning breakout
+  // from turning an unrelated late-day candle into a fresh CONFIRMED signal.
+  const pdhBreakRecent = lastPdhBreak >= 0 && latestTodayIndex - lastPdhBreak <= 6;
+  const pdlBreakRecent = lastPdlBreak >= 0 && latestTodayIndex - lastPdlBreak <= 6;
+  const pdhBrokenToday = lastPdhBreak >= 0;
+  const pdlBrokenToday = lastPdlBreak >= 0;
+
+  const latestBull = latest[4] > latest[1] && bodyPct(latest) >= 50;
+  const latestBear = latest[4] < latest[1] && bodyPct(latest) >= 50;
+  const previousBull = previous[4] > previous[1] && bodyPct(previous) >= 45;
+  const previousBear = previous[4] < previous[1] && bodyPct(previous) >= 45;
+
+  const previousClosedAbovePdh = Number.isFinite(pdh) && previous[4] > pdh;
+  const previousClosedBelowPdl = Number.isFinite(pdl) && previous[4] < pdl;
+  const liveAbovePdh = Number.isFinite(pdh) && livePrice > pdh;
+  const liveBelowPdl = Number.isFinite(pdl) && livePrice < pdl;
+
+  // ================================================================
+  // PDH / PDL SETUP CANDLES
+  // ================================================================
+  const latestPdhBreak = Number.isFinite(pdh) && latest[4] > pdh && latest[1] <= pdh;
+  const latestPdlBreak = Number.isFinite(pdl) && latest[4] < pdl && latest[1] >= pdl;
+  const latestPdhReaction = Number.isFinite(pdh) && latest[2] >= pdh && latest[4] <= pdh && nearLevel(latest[4], pdh);
+  const latestPdlReaction = Number.isFinite(pdl) && latest[3] <= pdl && latest[4] >= pdl && nearLevel(latest[4], pdl);
+
+  const pdhBuySetup = Number.isFinite(pdh) &&
+    emaBull && latestBull && latestVol >= 1.5 &&
+    (latestPdhBreak || latestPdhReaction || (pdhBrokenToday && liveAbovePdh));
+
+  const pdlSellSetup = Number.isFinite(pdl) &&
+    emaBear && latestBear && latestVol >= 1.5 &&
+    (latestPdlBreak || latestPdlReaction || (pdlBrokenToday && liveBelowPdl));
+
+  // ================================================================
+  // CONTINUATION SETUP — ONLY AFTER PDH/PDL HAS ALREADY BEEN BROKEN
+  // ================================================================
   const avgAtr = atr(usable, 14);
-  const lookback = usable.slice(Math.max(0, usable.length - 8), -1);
-  const priorHigh = lookback.length ? Math.max(...lookback.map(c => c[2])) : NaN;
-  const priorLow = lookback.length ? Math.min(...lookback.map(c => c[3])) : NaN;
-  const priorImpulseBull = Number.isFinite(avgAtr) && avgAtr > 0 && priorHigh - priorLow >= avgAtr * 1.2 && previous[4] > ema20;
-  const priorImpulseBear = Number.isFinite(avgAtr) && avgAtr > 0 && priorHigh - priorLow >= avgAtr * 1.2 && previous[4] < ema20;
-  const pullbackToEmaBull = emaBull && emaRising && Number.isFinite(avgAtr) && avgAtr > 0 && latest[3] <= ema20 + avgAtr * 0.65 && current > ema20;
-  const pullbackToEmaBear = emaBear && emaFalling && Number.isFinite(avgAtr) && avgAtr > 0 && latest[2] >= ema20 - avgAtr * 0.65 && current < ema20;
-  const bullishContinuation = latestBull && latestVol >= 1.5 && priorImpulseBull && pullbackToEmaBull && current > previous[2];
-  const bearishContinuation = latestBear && latestVol >= 1.5 && priorImpulseBear && pullbackToEmaBear && current < previous[3];
+  const pullbackBull = Number.isFinite(ema20) && Number.isFinite(avgAtr) && avgAtr > 0 &&
+    emaBull && emaRising && latest[3] <= ema20 + avgAtr * 0.65 && candleClose > ema20;
+  const pullbackBear = Number.isFinite(ema20) && Number.isFinite(avgAtr) && avgAtr > 0 &&
+    emaBear && emaFalling && latest[2] >= ema20 - avgAtr * 0.65 && candleClose < ema20;
 
-  const prevLookback = usable.slice(Math.max(0, usable.length - 9), -2);
-  const prevHigh = prevLookback.length ? Math.max(...prevLookback.map(c => c[2])) : NaN;
-  const prevLow = prevLookback.length ? Math.min(...prevLookback.map(c => c[3])) : NaN;
-  const prevAvgAtr = atr(usable.slice(0, -1), 14);
-  const prevPullbackBull = emaBull && emaRising && Number.isFinite(prevAvgAtr) && prevAvgAtr > 0 && previous[3] <= ema20 + prevAvgAtr * 0.65 && previous[4] > ema20;
-  const prevPullbackBear = emaBear && emaFalling && Number.isFinite(prevAvgAtr) && prevAvgAtr > 0 && previous[2] >= ema20 - prevAvgAtr * 0.65 && previous[4] < ema20;
-  const prevImpulseBull = Number.isFinite(prevAvgAtr) && prevAvgAtr > 0 && prevHigh - prevLow >= prevAvgAtr * 1.2 && previous[4] > ema20;
-  const prevImpulseBear = Number.isFinite(prevAvgAtr) && prevAvgAtr > 0 && prevHigh - prevLow >= prevAvgAtr * 1.2 && previous[4] < ema20;
-  const prevContinuationLong = prevBull && previousVol >= 1.5 && prevImpulseBull && prevPullbackBull && previous[4] > (twoBarsAgo?.[2] ?? previous[1]);
-  const prevContinuationShort = prevBear && previousVol >= 1.5 && prevImpulseBear && prevPullbackBear && previous[4] < (twoBarsAgo?.[3] ?? previous[1]);
+  const bullishContinuationSetup = pdhBrokenToday && liveAbovePdh &&
+    pullbackBull && latestBull && latestVol >= 1.5 &&
+    candleClose > previous[2];
 
-  // FINAL CONFIRMATION = immediately following 5-min candle + follow-through.
-  // IMPORTANT: the live price must STILL be beyond the breakout level.
-  // This prevents RPOWER-type false CONFIRMED rows after price falls back
-  // below the OR HIGH / PDH line.
-  const liveAboveOrHigh = Number.isFinite(orHigh) && livePrice > orHigh;
-  const liveBelowOrLow = Number.isFinite(orLow) && livePrice < orLow;
-  const liveAbovePdh = Number.isFinite(yh) && livePrice > yh;
-  const liveBelowPdl = Number.isFinite(yl) && livePrice < yl;
+  const bearishContinuationSetup = pdlBrokenToday && liveBelowPdl &&
+    pullbackBear && latestBear && latestVol >= 1.5 &&
+    candleClose < previous[3];
 
-  const longLevelConfirmed = prevLevelLong && latestBull && latestVol >= 2 && emaBull &&
-    ((prevPdhBreak || prevPdhReaction) ? liveAbovePdh && latest[4] > yh :
-      (prevOrBreak || prevOrReaction) ? liveAboveOrHigh && latest[4] > orHigh : false) &&
-    latest[4] > previous[2];
+  // ================================================================
+  // FINAL CONFIRMATION
+  // ================================================================
+  // ABSOLUTE RULE:
+  // BUY  = PDH must have been CLOSED ABOVE today + price remains above PDH.
+  // SELL = PDL must have been CLOSED BELOW today + price remains below PDL.
+  // OR breakout or EMA continuation alone can NEVER produce CONFIRMED.
+  // ================================================================
+  const buyFollowThrough = previousBull && latestBull &&
+    latestVol >= 2 && candleClose > previous[2] &&
+    emaBull && liveAbovePdh;
 
-  const shortLevelConfirmed = prevLevelShort && latestBear && latestVol >= 2 && emaBear &&
-    ((prevPdlBreak || prevPdlReaction) ? liveBelowPdl && latest[4] < yl :
-      (prevOrDown || prevOrReject) ? liveBelowOrLow && latest[4] < orLow : false) &&
-    latest[4] < previous[3];
+  const sellFollowThrough = previousBear && latestBear &&
+    latestVol >= 2 && candleClose < previous[3] &&
+    emaBear && liveBelowPdl;
 
-  const liveAboveEma = Number.isFinite(ema20) && livePrice > ema20;
-  const liveBelowEma = Number.isFinite(ema20) && livePrice < ema20;
-  const longContinuationConfirmed = prevContinuationLong && latestBull && latestVol >= 2 && emaBull && liveAboveEma && latest[4] > previous[2];
-  const shortContinuationConfirmed = prevContinuationShort && latestBear && latestVol >= 2 && emaBear && liveBelowEma && latest[4] < previous[3];
+  const pdhConfirmed = Number.isFinite(pdh) && pdhBreakRecent && buyFollowThrough;
+  const pdlConfirmed = Number.isFinite(pdl) && pdlBreakRecent && sellFollowThrough;
+
+  // A breakout candle itself is a SETUP. Confirmation comes from the next
+  // closed 5-minute candle showing follow-through while price stays beyond PDH/PDL.
+  const pdhBreakSetup = Number.isFinite(pdh) && latestPdhBreak && latestBull && latestVol >= 1.5 && emaBull;
+  const pdlBreakSetup = Number.isFinite(pdl) && latestPdlBreak && latestBear && latestVol >= 1.5 && emaBear;
 
   let status: ScanRow['status'] = 'NO TRADE';
   let setup = '—';
@@ -222,78 +239,64 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   let target: number | null = null;
   let signalTime: string | null = null;
 
-  if (longLevelConfirmed) {
-    setup = (prevPdhBreak || prevPdhReaction) ? 'PDH BUY' : 'OR HIGH BUY';
+  if (pdhConfirmed) {
+    setup = 'PDH BUY';
     status = 'CONFIRMED';
     entry = livePrice;
-    sl = Math.min(previous[3], latest[3]);
+    sl = Math.min(previous[3], latest[3], pdh);
     const risk = entry - sl;
     if (risk > 0 && risk / entry <= 0.02) target = entry + risk * 2;
-    reason = `${setup} + follow-through confirmation + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + 20 EMA`;
+    reason = `PDH breakout + follow-through + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + 20 EMA + price above PDH`;
     signalTime = latest[0];
-  } else if (shortLevelConfirmed) {
-    setup = (prevPdlBreak || prevPdlReaction) ? 'PDL SELL' : 'OR LOW SELL';
+  } else if (pdlConfirmed) {
+    setup = 'PDL SELL';
     status = 'CONFIRMED';
     entry = livePrice;
-    sl = Math.max(previous[2], latest[2]);
+    sl = Math.max(previous[2], latest[2], pdl);
     const risk = sl - entry;
     if (risk > 0 && risk / entry <= 0.02) target = entry - risk * 2;
-    reason = `${setup} + follow-through confirmation + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + 20 EMA`;
+    reason = `PDL breakdown + follow-through + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + 20 EMA + price below PDL`;
     signalTime = latest[0];
-  } else if (longContinuationConfirmed) {
-    setup = 'BUY CONTINUATION';
-    status = 'CONFIRMED';
-    entry = livePrice;
-    sl = Math.min(previous[3], latest[3]);
-    const risk = entry - sl;
-    if (risk > 0 && risk / entry <= 0.02) target = entry + risk * 2;
-    reason = `20 EMA pullback + bullish continuation + follow-through + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)}`;
-    signalTime = latest[0];
-  } else if (shortContinuationConfirmed) {
-    setup = 'SELL CONTINUATION';
-    status = 'CONFIRMED';
-    entry = livePrice;
-    sl = Math.max(previous[2], latest[2]);
-    const risk = sl - entry;
-    if (risk > 0 && risk / entry <= 0.02) target = entry - risk * 2;
-    reason = `20 EMA pullback + bearish continuation + follow-through + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)}`;
-    signalTime = latest[0];
-  } else if (latestLevelLong) {
-    setup = (latestPdhBreak || latestPdhReaction) ? 'PDH BUY SETUP' : 'OR HIGH BUY SETUP';
+  } else if (pdhBreakSetup) {
+    setup = 'PDH BUY SETUP';
     status = 'SETUP';
     entry = livePrice;
     sl = latest[3];
-    reason = `${setup} + bullish setup candle + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + 20 EMA; confirmation pending`;
+    reason = `PDH breakout candle + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + bullish 20 EMA; next candle confirmation pending`;
     signalTime = latest[0];
-  } else if (latestLevelShort) {
-    setup = (latestPdlBreak || latestPdlReaction) ? 'PDL SELL SETUP' : 'OR LOW SELL SETUP';
+  } else if (pdlBreakSetup) {
+    setup = 'PDL SELL SETUP';
     status = 'SETUP';
     entry = livePrice;
     sl = latest[2];
-    reason = `${setup} + bearish setup candle + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + 20 EMA; confirmation pending`;
+    reason = `PDL breakdown candle + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)} + bearish 20 EMA; next candle confirmation pending`;
     signalTime = latest[0];
-  } else if (bullishContinuation) {
+  } else if (bullishContinuationSetup) {
     setup = 'BUY CONTINUATION SETUP';
     status = 'SETUP';
     entry = livePrice;
-    sl = Math.min(latest[3], ema20);
-    reason = `20 EMA pullback + bullish continuation candle + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)}; confirmation pending`;
+    sl = Math.min(latest[3], ema20, pdh);
+    reason = `PDH already broken + 20 EMA pullback + bullish continuation + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)}; confirmation pending`;
     signalTime = latest[0];
-  } else if (bearishContinuation) {
+  } else if (bearishContinuationSetup) {
     setup = 'SELL CONTINUATION SETUP';
     status = 'SETUP';
     entry = livePrice;
-    sl = Math.max(latest[2], ema20);
-    reason = `20 EMA pullback + bearish continuation candle + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)}; confirmation pending`;
+    sl = Math.max(latest[2], ema20, pdl);
+    reason = `PDL already broken + 20 EMA pullback + bearish continuation + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)}; confirmation pending`;
     signalTime = latest[0];
   } else if (emaBull && emaRising && latestVol >= 1) {
     status = 'WATCH';
     setup = 'BUY WATCH';
-    reason = 'Above rising 20 EMA; waiting for PDH/OR reaction or 20 EMA continuation setup';
+    reason = Number.isFinite(pdh) && !liveAbovePdh
+      ? 'Above rising 20 EMA; waiting for PDH breakout/reaction'
+      : 'Above rising 20 EMA; waiting for PDH follow-through confirmation';
   } else if (emaBear && emaFalling && latestVol >= 1) {
     status = 'WATCH';
     setup = 'SELL WATCH';
-    reason = 'Below falling 20 EMA; waiting for PDL/OR reaction or 20 EMA continuation setup';
+    reason = Number.isFinite(pdl) && !liveBelowPdl
+      ? 'Below falling 20 EMA; waiting for PDL breakdown/reaction'
+      : 'Below falling 20 EMA; waiting for PDL follow-through confirmation';
   }
 
   return {
