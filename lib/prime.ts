@@ -52,6 +52,14 @@ function bodyPct(c: Candle) {
   return range > 0 ? Math.abs(c[4] - c[1]) / range * 100 : 0;
 }
 
+function volumeLabel(volumeX: number) {
+  if (volumeX >= 6) return 'EXTREME VOLUME';
+  if (volumeX >= 4) return 'VERY HIGH VOLUME';
+  if (volumeX >= 2) return 'HIGH VOLUME';
+  if (volumeX >= 1.5) return 'STRONG VOLUME';
+  return 'NORMAL VOLUME';
+}
+
 function crossedAbove(c: Candle, level: number) {
   return Number.isFinite(level) && c[3] <= level && c[4] > level;
 }
@@ -82,7 +90,6 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
   const avgVol = average(volumes.slice(Math.max(0, volumes.length - 21), -1));
   const volumeX = avgVol > 0 ? latest[5] / avgVol : 0;
 
-  // Previous-session reference levels. These are used as confluence, not as standalone signals.
   const yh = daily?.prev_ohlc?.high ?? NaN;
   const yl = daily?.prev_ohlc?.low ?? NaN;
   const pc = prevClose;
@@ -106,10 +113,9 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
   let target: number | null = null;
   let signalTime: string | null = null;
 
-  // 09:15–09:20 opening range. It is a confluence only; crossing it alone is NOT a signal.
   const opening = usable.find(c => {
     const d = new Date(c[0]);
-    return d.getUTCHours() === 3 && d.getUTCMinutes() === 45; // 09:15 IST
+    return d.getUTCHours() === 3 && d.getUTCMinutes() === 45;
   });
   const orHigh = opening?.[2] ?? NaN;
   const orLow = opening?.[3] ?? NaN;
@@ -117,12 +123,6 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
   const levelValues = Object.entries(levels).filter(([, value]) => Number.isFinite(value)) as [string, number][];
   const recentStart = Math.max(20, usable.length - 10);
 
-  // Strict Prime Technical sequence:
-  // 1) meaningful level/OR interaction
-  // 2) strong directional candle
-  // 3) above-average volume
-  // 4) 20 EMA alignment
-  // 5) separate confirmation candle with >=2X volume
   for (let i = recentStart; i < usable.length - 1; i++) {
     const c = usable[i];
     const n = usable[i + 1];
@@ -130,6 +130,7 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
     const bull = c[4] > c[1] && cBody >= 55;
     const bear = c[4] < c[1] && cBody >= 55;
     const cVol = avgVol > 0 ? c[5] / avgVol : 0;
+    const cVolLabel = volumeLabel(cVol);
 
     const touchedBull = levelValues.find(([, v]) => crossedAbove(c, v));
     const touchedBear = levelValues.find(([, v]) => crossedBelow(c, v));
@@ -138,7 +139,6 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
     const orBreakBull = Number.isFinite(orHigh) && crossedAbove(c, orHigh);
     const orBreakBear = Number.isFinite(orLow) && crossedBelow(c, orLow);
 
-    // Opening-range break is accepted only when it also has level/EMA/volume confluence.
     const longInteraction = Boolean(touchedBull || fakeBreakdown || orBreakBull);
     const shortInteraction = Boolean(touchedBear || fakeBreakout || orBreakBear);
     const longSetup = bull && longInteraction && cVol >= 1.5 && c[4] > ema20 && emaBull;
@@ -147,7 +147,7 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
     if (longSetup) {
       setup = fakeBreakdown ? 'FAKE BREAKDOWN' : orBreakBull ? 'OR BREAKOUT' : 'LEVEL REACTION';
       status = 'SETUP';
-      reason = `${setup} + bullish candle + ${cVol.toFixed(1)}X volume + 20 EMA`;
+      reason = `${setup} + bullish candle + ${cVol.toFixed(1)}X ${cVolLabel} + 20 EMA`;
       entry = c[2];
       sl = fakeBreakdown ? c[3] : Math.min(c[3], previous?.[3] ?? c[3]);
 
@@ -158,7 +158,7 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
         const risk = n[2] - sl;
         if (risk > 0 && risk / n[2] <= 0.02) {
           status = 'CONFIRMED';
-          reason = 'Setup + confirmation candle + 2X volume + 20 EMA';
+          reason = `Setup + confirmation candle + ${nVol.toFixed(1)}X ${volumeLabel(nVol)} + 20 EMA`;
           entry = n[2];
           target = entry + risk * 2;
           signalTime = n[0];
@@ -169,7 +169,7 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
     if (shortSetup) {
       setup = fakeBreakout ? 'FAKE BREAKOUT' : orBreakBear ? 'OR BREAKDOWN' : 'LEVEL REJECTION';
       status = 'SETUP';
-      reason = `${setup} + bearish candle + ${cVol.toFixed(1)}X volume + 20 EMA`;
+      reason = `${setup} + bearish candle + ${cVol.toFixed(1)}X ${cVolLabel} + 20 EMA`;
       entry = c[3];
       sl = fakeBreakout ? c[2] : Math.max(c[2], previous?.[2] ?? c[2]);
 
@@ -180,19 +180,15 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
         const risk = sl - n[3];
         if (risk > 0 && risk / n[3] <= 0.02) {
           status = 'CONFIRMED';
-          reason = 'Setup + confirmation candle + 2X volume + 20 EMA';
+          reason = `Setup + confirmation candle + ${nVol.toFixed(1)}X ${volumeLabel(nVol)} + 20 EMA`;
           entry = n[3];
           target = entry - risk * 2;
           signalTime = n[0];
         }
       }
     }
-
-    // The most recent valid setup wins; never create a trade from OR alone.
   }
 
-  // If no confirmed trade exists, expose only a genuine setup. This deliberately
-  // removes the previous behaviour that produced dozens of generic OR WATCH rows.
   if (status === 'NO TRADE') {
     const last = usable[usable.length - 1];
     const lastBody = bodyPct(last);
@@ -202,23 +198,24 @@ function rowFromCandles(symbol: string, candles: Candle[], daily: DailyQuote | u
     const nearLevel = nearestLevel(last[4], levels, 0.0025);
     const orBull = Number.isFinite(orHigh) && last[4] > orHigh;
     const orBear = Number.isFinite(orLow) && last[4] < orLow;
+    const lastVolLabel = volumeLabel(lastVol);
 
     if (bull && nearLevel !== '—' && lastVol >= 1.5 && last[4] > ema20 && emaBull) {
       status = 'WATCH';
       setup = 'LEVEL SETUP';
-      reason = `Strong bullish candle at ${nearLevel} + ${lastVol.toFixed(1)}X volume; confirmation pending`;
+      reason = `Strong bullish candle at ${nearLevel} + ${lastVol.toFixed(1)}X ${lastVolLabel}; confirmation pending`;
     } else if (bear && nearLevel !== '—' && lastVol >= 1.5 && last[4] < ema20 && emaBear) {
       status = 'WATCH';
       setup = 'LEVEL SETUP';
-      reason = `Strong bearish candle at ${nearLevel} + ${lastVol.toFixed(1)}X volume; confirmation pending`;
+      reason = `Strong bearish candle at ${nearLevel} + ${lastVol.toFixed(1)}X ${lastVolLabel}; confirmation pending`;
     } else if (bull && orBull && lastVol >= 1.5 && last[4] > ema20 && emaBull) {
       status = 'WATCH';
       setup = 'OR BREAKOUT';
-      reason = `09:15 range breakout + ${lastVol.toFixed(1)}X volume + 20 EMA; confirmation pending`;
+      reason = `09:15 range breakout + ${lastVol.toFixed(1)}X ${lastVolLabel} + 20 EMA; confirmation pending`;
     } else if (bear && orBear && lastVol >= 1.5 && last[4] < ema20 && emaBear) {
       status = 'WATCH';
       setup = 'OR BREAKDOWN';
-      reason = `09:15 range breakdown + ${lastVol.toFixed(1)}X volume + 20 EMA; confirmation pending`;
+      reason = `09:15 range breakdown + ${lastVol.toFixed(1)}X ${lastVolLabel} + 20 EMA; confirmation pending`;
     }
   }
 
@@ -269,6 +266,5 @@ export async function scanUniverse(universe: PrimeInstrument[]) {
   });
 
   const priority: Record<ScanRow['status'], number> = { CONFIRMED: 0, SETUP: 1, WATCH: 2, 'NO TRADE': 3 };
-  return rows
-    .sort((a, b) => priority[a.status] - priority[b.status] || Math.abs(b.change) - Math.abs(a.change));
+  return rows.sort((a, b) => priority[a.status] - priority[b.status] || Math.abs(b.change) - Math.abs(a.change));
 }
