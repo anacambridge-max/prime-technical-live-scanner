@@ -45,14 +45,11 @@ export default function Home() {
 
   useEffect(() => {
     refresh();
-    const id = setInterval(refresh, 30000);
+    const id = setInterval(refresh, 60000);
     return () => clearInterval(id);
   }, []);
 
-  const candidates = useMemo(
-    () => rows.filter(r => r.status !== 'NO TRADE'),
-    [rows],
-  );
+  const candidates = useMemo(() => rows.filter(r => r.status !== 'NO TRADE'), [rows]);
   const confirmed = rows.filter(r => r.status === 'CONFIRMED').length;
   const setups = rows.filter(r => r.status === 'SETUP').length;
   const watch = rows.filter(r => r.status === 'WATCH').length;
@@ -64,15 +61,13 @@ export default function Home() {
           <div className="brandMark">PT</div>
           <div>
             <div className="title">Prime Technical Live Scanner</div>
-            <div className="sub">Upstox-powered 5-minute intraday decision terminal</div>
+            <div className="sub">Full NSE F&amp;O universe • Upstox • 5-minute intraday</div>
           </div>
         </div>
         <div className="actions">
           <div className="live"><span className="dot" /> LIVE</div>
           <div className="select">5 Minute</div>
-          <button className="btn" onClick={refresh} disabled={loading}>
-            {loading ? 'Scanning…' : 'Refresh'}
-          </button>
+          <button className="btn" onClick={refresh} disabled={loading}>{loading ? 'Scanning…' : 'Refresh'}</button>
         </div>
       </header>
 
@@ -80,7 +75,7 @@ export default function Home() {
         <div className="card"><div className="label">Confirmed</div><div className="value green">{confirmed}</div></div>
         <div className="card"><div className="label">Setups</div><div className="value">{setups}</div></div>
         <div className="card"><div className="label">Watch</div><div className="value">{watch}</div></div>
-        <div className="card"><div className="label">F&O Universe</div><div className="value">{universeSize || '—'}</div></div>
+        <div className="card"><div className="label">F&amp;O Universe</div><div className="value">{universeSize || '—'}</div></div>
         <div className="card"><div className="label">Last update</div><div className="value" style={{ fontSize: 18 }}>{updated}</div></div>
       </section>
 
@@ -129,7 +124,7 @@ export default function Home() {
         </div>
       </section>
 
-      <div className="footer">Upstox token server-side • 5-minute candles • Auto refresh 30s • No order execution</div>
+      <div className="footer">Upstox token server-side • Full F&amp;O universe • 5-minute candles • Auto refresh 60s • No order execution</div>
     </main>
   );
 }
