@@ -34,16 +34,18 @@ export async function getPrimeUniverse(): Promise<PrimeInstrument[]> {
   if (!res.ok) throw new Error(`Unable to download Upstox NSE instruments: ${res.status}`);
 
   const bytes = Buffer.from(await res.arrayBuffer());
-  const raw = bytes[0] === 0x1f && bytes[1] === 0x8b ? gunzipSync(bytes).toString('utf8') : bytes.toString('utf8');
+  const raw = bytes[0] === 0x1f && bytes[1] === 0x8b
+    ? gunzipSync(bytes).toString('utf8')
+    : bytes.toString('utf8');
   const instruments = JSON.parse(raw) as UpstoxInstrument[];
 
   const today = Date.now();
   const nearestFuture = new Map<string, UpstoxInstrument>();
-  const equities = new Map<string, UpstoxInstrument>();
+  const equities = new Set<string>();
 
   for (const item of instruments) {
     if (item.segment === 'NSE_EQ' && item.instrument_type === 'EQ' && item.instrument_key) {
-      equities.set(item.instrument_key, item);
+      equities.add(item.instrument_key);
     }
 
     if (
@@ -62,6 +64,9 @@ export async function getPrimeUniverse(): Promise<PrimeInstrument[]> {
     }
   }
 
+  // Use the nearest active stock future as the F&O membership test, then scan
+  // the corresponding NSE cash instrument so LTP/levels/5-minute candles are
+  // based on the equity chart (the instrument actually traded by the scanner).
   const universe = [...nearestFuture.entries()]
     .map(([underlyingKey, future]) => ({
       symbol: future.underlying_symbol as string,
@@ -70,7 +75,12 @@ export async function getPrimeUniverse(): Promise<PrimeInstrument[]> {
     .filter(item => equities.has(item.instrumentKey))
     .sort((a, b) => a.symbol.localeCompare(b.symbol));
 
-  const maxSymbols = Math.max(10, Number(process.env.PRIME_MAX_SYMBOLS || 30));
+  // The Upstox candle endpoint is per instrument. A very large universe can
+  // exceed a Vercel function's execution window, so keep a production-safe
+  // default while allowing the full universe to be enabled with an env var.
+  const configuredMax = Number(process.env.PRIME_MAX_SYMBOLS || 150);
+  const maxSymbols = Math.min(300, Math.max(50, configuredMax));
+
   cachedUniverse = universe.slice(0, maxSymbols);
   cachedAt = now;
   return cachedUniverse;
