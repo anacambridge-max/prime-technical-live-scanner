@@ -53,8 +53,6 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   const prevClose = daily?.prev_ohlc?.close ?? previous[4] ?? candleClose;
   const change = prevClose ? ((livePrice - prevClose) / prevClose) * 100 : 0;
 
-  // EMA is calculated from the candles actually available. It becomes more
-  // stable as the session progresses; it must not block early-session scanning.
   const ema20 = ema(closes.slice(-60), 20); const ema20Prev = ema(closes.slice(-61, -1), 20);
   const emaBull = Number.isFinite(ema20) && candleClose > ema20; const emaBear = Number.isFinite(ema20) && candleClose < ema20;
   const emaRising = Number.isFinite(ema20) && Number.isFinite(ema20Prev) && ema20 >= ema20Prev;
@@ -72,7 +70,7 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   const pdhDistance = Number.isFinite(pdh) ? Math.abs(livePrice - pdh) / Math.max(Math.abs(pdh), 1) : Infinity;
   const pdlDistance = Number.isFinite(pdl) ? Math.abs(livePrice - pdl) / Math.max(Math.abs(pdl), 1) : Infinity;
   let level = '—';
-  if (pdhDistance <= 0.005 && pdhDistance <= pdlDistance) level = 'PDH'; else if (pdlDistance <= 0.005) level = 'PDL';
+  if (pdhDistance <= 0.01 && pdhDistance <= pdlDistance) level = 'PDH'; else if (pdlDistance <= 0.01) level = 'PDL';
 
   const today = indiaDate(latest[0]); const todayCandles = usable.filter(c => indiaDate(c[0]) === today); const latestTodayIndex = todayCandles.length - 1;
   const pdhBreakIndices: number[] = []; const pdlBreakIndices: number[] = [];
@@ -108,8 +106,9 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   const bullishContinuationSetup = pdhBrokenToday && liveAbovePdh && pullbackBull && latestBull && latestVol >= 1.5 && candleClose > previous[2];
   const bearishContinuationSetup = pdlBrokenToday && liveBelowPdl && pullbackBear && latestBear && latestVol >= 1.5 && candleClose < previous[3];
 
-  // Keep WATCH focused: only stocks within 0.5% of PDH/PDL are candidates.
-  const nearPdh = Number.isFinite(pdh) && pdhDistance <= 0.005; const nearPdl = Number.isFinite(pdl) && pdlDistance <= 0.005;
+  // WATCH is intentionally broader than confirmation: show stocks within 1% of PDH/PDL
+  // so the trader can see the developing candidates. This does NOT loosen SETUP or CONFIRMED.
+  const nearPdh = Number.isFinite(pdh) && pdhDistance <= 0.01; const nearPdl = Number.isFinite(pdl) && pdlDistance <= 0.01;
   let status: ScanRow['status'] = 'NO TRADE'; let setup = '—'; let reason = 'No current PDH/PDL Prime Technical setup';
   let entry: number | null = null; let sl: number | null = null; let target: number | null = null; let signalTime: string | null = null;
 
@@ -153,8 +152,6 @@ export async function scanUniverse(universe: PrimeInstrument[]) {
   await chunk(universe, 8, async instrument => {
     try {
       const response = await getIntradayCandles(instrument.instrumentKey, 5); const candles = (response?.data?.candles ?? []) as Candle[];
-      // Two candles are enough to keep the stock in the live scan. The actual
-      // Prime Technical confirmation still requires PDH/PDL + candle + volume + EMA.
       if (candles.length >= 2) rows.push(rowFromCandles(instrument.symbol, candles, dailyMap.get(instrument.instrumentKey)));
     } catch { /* Skip temporarily unavailable instruments. */ }
   });
