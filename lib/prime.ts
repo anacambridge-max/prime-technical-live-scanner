@@ -8,7 +8,8 @@ export type ScanRow = {
 };
 
 type Candle = [string, number, number, number, number, number, number];
-type DailyQuote = { last_price?: number; prev_ohlc?: { close?: number; high?: number; low?: number }; live_ohlc?: { close?: number; high?: number; low?: number } };
+type DailyQuote = { last_price?: number };
+type PdhPdl = { pdh: number; pdl: number; prevClose: number };
 
 function ema(values: number[], length: number) {
   if (!values.length) return NaN;
@@ -31,11 +32,110 @@ function volumeLabel(x: number) {
   if (x >= 6) return 'EXTREME VOLUME'; if (x >= 4) return 'VERY HIGH VOLUME'; if (x >= 2) return 'HIGH VOLUME';
   if (x >= 1.5) return 'STRONG VOLUME'; return 'NORMAL VOLUME';
 }
-function indiaDate(timestamp: string) {
+function indiaDate(timestamp: string | number = Date.now()) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(timestamp));
 }
+function dateMinusDays(dateKey: string, days: number) {
+  const d = new Date(`${dateKey}T00:00:00+05:30`); d.setUTCDate(d.getUTCDate() - days);
+  return indiaDate(d);
+}
+function parseCsvLine(line: string) {
+  const out: string[] = []; let cur = ''; let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (quoted && line[i + 1] === '"') { cur += '"'; i++; }
+      else quoted = !quoted;
+    } else if (ch === ',' && !quoted) { out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur); return out;
+}
+function cleanNumber(value?: string) {
+  const n = Number(String(value ?? '').replace(/,/g, '').trim());
+  return Number.isFinite(n) ? n : NaN;
+}
 
-function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): ScanRow {
+let cachedPdhPdlDate = '';
+let cachedPdhPdl = new Map<string, PdhPdl>();
+let pdhPdlInFlight: Promise<Map<string, PdhPdl>> | null = null;
+
+async function loadPreviousDayLevels(universe: PrimeInstrument[]) {
+  const today = indiaDate();
+  if (cachedPdhPdlDate === today && cachedPdhPdl.size) return cachedPdhPdl;
+  if (pdhPdlInFlight) return pdhPdlInFlight;
+
+  pdhPdlInFlight = (async () => {
+    // NSE's full bhavcopy gives the previous trading session's actual High/Low
+    // for the whole cash market in ONE file. This is the correct source for PDH/PDL.
+    // We cache it for the entire trading day; PDH/PDL do not change intraday.
+    const wanted = new Set(universe.map(x => x.symbol.toUpperCase()));
+    let text = '';
+    let usedDate = '';
+    for (let daysBack = 1; daysBack <= 7; daysBack++) {
+      const dateKey = dateMinusDays(today, daysBack);
+      const ddmmyyyy = dateKey.split('-').reverse().join('');
+      const url = `https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_${ddmmyyyy}.csv`;
+      try {
+        const res = await fetch(url, {
+          headers: {
+            Accept: 'text/csv,text/plain;q=0.9,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15',
+            Referer: 'https://www.nseindia.com/',
+          },
+          cache: 'no-store',
+        });
+        if (res.ok) {
+          const candidate = await res.text();
+          if (candidate.includes('SYMBOL') || candidate.includes('TckrSymb')) { text = candidate; usedDate = dateKey; break; }
+        }
+      } catch { /* Try the preceding trading day. */ }
+    }
+
+    const map = new Map<string, PdhPdl>();
+    if (!text) {
+      cachedPdhPdlDate = today;
+      cachedPdhPdl = map;
+      return map;
+    }
+
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    const headers = parseCsvLine(lines[0]).map(x => x.trim().replace(/^"|"$/g, ''));
+    const idx = (names: string[]) => names.map(n => headers.findIndex(h => h.toLowerCase() === n.toLowerCase())).find(i => i >= 0) ?? -1;
+    const symbolIdx = idx(['SYMBOL', 'TckrSymb']);
+    const seriesIdx = idx(['SERIES', 'SctySrs']);
+    const highIdx = idx(['HIGH_PRICE', 'HIGH', 'HghPric']);
+    const lowIdx = idx(['LOW_PRICE', 'LOW', 'LwPric']);
+    const prevCloseIdx = idx(['PREV_CLOSE', 'PREVCLOSE', 'PrvsClsgPric']);
+
+    if (symbolIdx < 0 || highIdx < 0 || lowIdx < 0) {
+      cachedPdhPdlDate = today; cachedPdhPdl = map; return map;
+    }
+
+    for (const line of lines.slice(1)) {
+      const cells = parseCsvLine(line);
+      const symbol = String(cells[symbolIdx] ?? '').trim().toUpperCase();
+      if (!symbol || !wanted.has(symbol)) continue;
+      const series = seriesIdx >= 0 ? String(cells[seriesIdx] ?? '').trim().toUpperCase() : 'EQ';
+      // Nifty 500 cash equities can be EQ/BE/BZ. Ignore unrelated debt/ETF/etc rows.
+      if (!['EQ', 'BE', 'BZ'].includes(series)) continue;
+      const pdh = cleanNumber(cells[highIdx]); const pdl = cleanNumber(cells[lowIdx]);
+      const prevClose = prevCloseIdx >= 0 ? cleanNumber(cells[prevCloseIdx]) : NaN;
+      if (!Number.isFinite(pdh) || !Number.isFinite(pdl)) continue;
+      if (!map.has(symbol)) map.set(symbol, { pdh, pdl, prevClose });
+    }
+
+    cachedPdhPdlDate = today;
+    cachedPdhPdl = map;
+    void usedDate;
+    return map;
+  })();
+
+  try { return await pdhPdlInFlight; }
+  finally { pdhPdlInFlight = null; }
+}
+
+function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote, levels?: PdhPdl): ScanRow {
   const sorted = [...candles].sort((a, b) => new Date(a[0]).getTime() - new Date(b[0]).getTime());
   const now = Date.now();
   const closed = sorted.filter(c => new Date(c[0]).getTime() + 5 * 60 * 1000 <= now);
@@ -46,7 +146,7 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   const candleClose = latest[4];
   const livePrice = Number.isFinite(daily?.last_price) ? daily!.last_price! : candleClose;
   const closes = usable.map(c => c[4]); const volumes = usable.map(c => c[5]);
-  const prevClose = daily?.prev_ohlc?.close ?? previous[4] ?? candleClose;
+  const prevClose = Number.isFinite(levels?.prevClose) ? levels!.prevClose : previous[4];
   const change = prevClose ? ((livePrice - prevClose) / prevClose) * 100 : 0;
 
   const ema20 = ema(closes.slice(-60), 20); const ema20Prev = ema(closes.slice(-61, -1), 20);
@@ -59,8 +159,8 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   const avgVol = average(priorVolumes);
   const latestVol = avgVol > 0 ? latest[5] / avgVol : 0;
 
-  // PDH / PDL are the PRIMARY levels. OR levels never confirm a trade.
-  const pdh = daily?.prev_ohlc?.high ?? NaN; const pdl = daily?.prev_ohlc?.low ?? NaN;
+  // PDH / PDL are the PRIMARY levels and come from the previous NSE trading session.
+  const pdh = levels?.pdh ?? NaN; const pdl = levels?.pdl ?? NaN;
   const pdhDistance = Number.isFinite(pdh) ? Math.abs(livePrice - pdh) / Math.max(Math.abs(pdh), 1) : Infinity;
   const pdlDistance = Number.isFinite(pdl) ? Math.abs(livePrice - pdl) / Math.max(Math.abs(pdl), 1) : Infinity;
   let level = '—';
@@ -101,13 +201,12 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   const bearishContinuationSetup = pdlBrokenToday && liveBelowPdl && pullbackBear && latestBear && latestVol >= 1.5 && candleClose < previous[3];
 
   // WATCH is deliberately broader (2%) so the dashboard does not go blank.
-  // This only creates a watchlist candidate; it can never become CONFIRMED without PDH/PDL confirmation above.
   const nearPdh = Number.isFinite(pdh) && pdhDistance <= 0.02;
   const nearPdl = Number.isFinite(pdl) && pdlDistance <= 0.02;
   const buyWatch = nearPdh && emaBull;
   const sellWatch = nearPdl && emaBear;
 
-  let status: ScanRow['status'] = 'NO TRADE'; let setup = '—'; let reason = 'No current PDH/PDL Prime Technical setup';
+  let status: ScanRow['status'] = 'NO TRADE'; let setup = '—'; let reason = levels ? 'No current PDH/PDL Prime Technical setup' : 'PDH/PDL data unavailable';
   let entry: number | null = null; let sl: number | null = null; let target: number | null = null; let signalTime: string | null = null;
 
   if (pdhConfirmed) {
@@ -147,11 +246,13 @@ export async function scanUniverse(universe: PrimeInstrument[]) {
     const part = dailyKeys.slice(i, i + 50); const quote = await getOHLC(part, '1d');
     for (const [key, value] of Object.entries((quote?.data ?? {}) as Record<string, DailyQuote>)) dailyMap.set(key, value);
   }
+
+  const pdhPdlMap = await loadPreviousDayLevels(universe);
   const rows: ScanRow[] = [];
   await chunk(universe, 8, async instrument => {
     try {
       const response = await getIntradayCandles(instrument.instrumentKey, 5); const candles = (response?.data?.candles ?? []) as Candle[];
-      if (candles.length >= 2) rows.push(rowFromCandles(instrument.symbol, candles, dailyMap.get(instrument.instrumentKey)));
+      if (candles.length >= 2) rows.push(rowFromCandles(instrument.symbol, candles, dailyMap.get(instrument.instrumentKey), pdhPdlMap.get(instrument.symbol.toUpperCase())));
     } catch { /* Skip temporarily unavailable instruments. */ }
   });
   const priority: Record<ScanRow['status'], number> = { CONFIRMED: 0, SETUP: 1, WATCH: 2, 'NO TRADE': 3 };
