@@ -31,9 +31,6 @@ function volumeLabel(x: number) {
   if (x >= 6) return 'EXTREME VOLUME'; if (x >= 4) return 'VERY HIGH VOLUME'; if (x >= 2) return 'HIGH VOLUME';
   if (x >= 1.5) return 'STRONG VOLUME'; return 'NORMAL VOLUME';
 }
-function nearLevel(price: number, level: number, tolerancePct = 0.0035) {
-  return Number.isFinite(level) && Math.abs(price - level) / Math.max(Math.abs(level), 1) <= tolerancePct;
-}
 function indiaDate(timestamp: string) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(timestamp));
 }
@@ -42,7 +39,11 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   const sorted = [...candles].sort((a, b) => new Date(a[0]).getTime() - new Date(b[0]).getTime());
   const now = Date.now();
   const closed = sorted.filter(c => new Date(c[0]).getTime() + 5 * 60 * 1000 <= now);
-  const usable = closed.length >= 30 ? closed : sorted;
+
+  // Early-session safe: use all completed 5-minute candles available today.
+  // Do NOT require 30 candles (30 x 5m = 150 minutes), otherwise the scanner
+  // stays empty during the first 2.5 hours of the trading session.
+  const usable = closed.length >= 2 ? closed : sorted;
   const latest = usable[usable.length - 1]; const previous = usable[usable.length - 2];
   if (!latest || !previous) return { symbol, ltp: 0, change: 0, volumeX: 0, ema: '—', level: '—', setup: '—', status: 'NO TRADE', entry: null, sl: null, target: null, reason: 'Insufficient 5-minute candles', signalTime: null };
 
@@ -51,11 +52,19 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   const closes = usable.map(c => c[4]); const volumes = usable.map(c => c[5]);
   const prevClose = daily?.prev_ohlc?.close ?? previous[4] ?? candleClose;
   const change = prevClose ? ((livePrice - prevClose) / prevClose) * 100 : 0;
+
+  // EMA is calculated from the candles actually available. It becomes more
+  // stable as the session progresses; it must not block early-session scanning.
   const ema20 = ema(closes.slice(-60), 20); const ema20Prev = ema(closes.slice(-61, -1), 20);
   const emaBull = Number.isFinite(ema20) && candleClose > ema20; const emaBear = Number.isFinite(ema20) && candleClose < ema20;
   const emaRising = Number.isFinite(ema20) && Number.isFinite(ema20Prev) && ema20 >= ema20Prev;
   const emaFalling = Number.isFinite(ema20) && Number.isFinite(ema20Prev) && ema20 <= ema20Prev;
-  const avgVol = average(volumes.slice(Math.max(0, volumes.length - 21), -1));
+
+  // Volume is per 5-minute candle. Until 20 prior completed candles exist,
+  // use the available prior completed candles as the baseline. Once 20 exist,
+  // this naturally becomes the rolling 20-candle baseline.
+  const priorVolumes = volumes.slice(0, -1).slice(-20);
+  const avgVol = average(priorVolumes);
   const latestVol = avgVol > 0 ? latest[5] / avgVol : 0;
 
   // PDH / PDL are the PRIMARY levels. OR levels are intentionally not used for confirmation.
@@ -144,7 +153,9 @@ export async function scanUniverse(universe: PrimeInstrument[]) {
   await chunk(universe, 8, async instrument => {
     try {
       const response = await getIntradayCandles(instrument.instrumentKey, 5); const candles = (response?.data?.candles ?? []) as Candle[];
-      if (candles.length >= 30) rows.push(rowFromCandles(instrument.symbol, candles, dailyMap.get(instrument.instrumentKey)));
+      // Two candles are enough to keep the stock in the live scan. The actual
+      // Prime Technical confirmation still requires PDH/PDL + candle + volume + EMA.
+      if (candles.length >= 2) rows.push(rowFromCandles(instrument.symbol, candles, dailyMap.get(instrument.instrumentKey)));
     } catch { /* Skip temporarily unavailable instruments. */ }
   });
   const priority: Record<ScanRow['status'], number> = { CONFIRMED: 0, SETUP: 1, WATCH: 2, 'NO TRADE': 3 };
