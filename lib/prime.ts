@@ -39,10 +39,6 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   const sorted = [...candles].sort((a, b) => new Date(a[0]).getTime() - new Date(b[0]).getTime());
   const now = Date.now();
   const closed = sorted.filter(c => new Date(c[0]).getTime() + 5 * 60 * 1000 <= now);
-
-  // Early-session safe: use all completed 5-minute candles available today.
-  // Do NOT require 30 candles (30 x 5m = 150 minutes), otherwise the scanner
-  // stays empty during the first 2.5 hours of the trading session.
   const usable = closed.length >= 2 ? closed : sorted;
   const latest = usable[usable.length - 1]; const previous = usable[usable.length - 2];
   if (!latest || !previous) return { symbol, ltp: 0, change: 0, volumeX: 0, ema: '—', level: '—', setup: '—', status: 'NO TRADE', entry: null, sl: null, target: null, reason: 'Insufficient 5-minute candles', signalTime: null };
@@ -58,19 +54,17 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   const emaRising = Number.isFinite(ema20) && Number.isFinite(ema20Prev) && ema20 >= ema20Prev;
   const emaFalling = Number.isFinite(ema20) && Number.isFinite(ema20Prev) && ema20 <= ema20Prev;
 
-  // Volume is per 5-minute candle. Until 20 prior completed candles exist,
-  // use the available prior completed candles as the baseline. Once 20 exist,
-  // this naturally becomes the rolling 20-candle baseline.
+  // Volume is strictly per 5-minute candle, compared with the previous completed 5-minute candles.
   const priorVolumes = volumes.slice(0, -1).slice(-20);
   const avgVol = average(priorVolumes);
   const latestVol = avgVol > 0 ? latest[5] / avgVol : 0;
 
-  // PDH / PDL are the PRIMARY levels. OR levels are intentionally not used for confirmation.
+  // PDH / PDL are the PRIMARY levels. OR levels never confirm a trade.
   const pdh = daily?.prev_ohlc?.high ?? NaN; const pdl = daily?.prev_ohlc?.low ?? NaN;
   const pdhDistance = Number.isFinite(pdh) ? Math.abs(livePrice - pdh) / Math.max(Math.abs(pdh), 1) : Infinity;
   const pdlDistance = Number.isFinite(pdl) ? Math.abs(livePrice - pdl) / Math.max(Math.abs(pdl), 1) : Infinity;
   let level = '—';
-  if (pdhDistance <= 0.01 && pdhDistance <= pdlDistance) level = 'PDH'; else if (pdlDistance <= 0.01) level = 'PDL';
+  if (pdhDistance <= 0.02 && pdhDistance <= pdlDistance) level = 'PDH'; else if (pdlDistance <= 0.02) level = 'PDL';
 
   const today = indiaDate(latest[0]); const todayCandles = usable.filter(c => indiaDate(c[0]) === today); const latestTodayIndex = todayCandles.length - 1;
   const pdhBreakIndices: number[] = []; const pdlBreakIndices: number[] = [];
@@ -96,7 +90,7 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   const pullbackBull = Number.isFinite(ema20) && avgAtr > 0 && emaBull && emaRising && latest[3] <= ema20 + avgAtr * 0.65 && candleClose > ema20;
   const pullbackBear = Number.isFinite(ema20) && avgAtr > 0 && emaBear && emaFalling && latest[2] >= ema20 - avgAtr * 0.65 && candleClose < ema20;
 
-  // CONFIRMED requires PDH/PDL. OR/EMA cannot independently confirm.
+  // FINAL CONFIRMATION: PDH/PDL break + two-candle follow-through + volume + 20 EMA + price still beyond level.
   const buyFollowThrough = previousBull && latestBull && latestVol >= 2 && candleClose > previous[2] && emaBull && liveAbovePdh;
   const sellFollowThrough = previousBear && latestBear && latestVol >= 2 && candleClose < previous[3] && emaBear && liveBelowPdl;
   const pdhConfirmed = Number.isFinite(pdh) && pdhBreakRecent && buyFollowThrough;
@@ -106,9 +100,13 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   const bullishContinuationSetup = pdhBrokenToday && liveAbovePdh && pullbackBull && latestBull && latestVol >= 1.5 && candleClose > previous[2];
   const bearishContinuationSetup = pdlBrokenToday && liveBelowPdl && pullbackBear && latestBear && latestVol >= 1.5 && candleClose < previous[3];
 
-  // WATCH is intentionally broader than confirmation: show stocks within 1% of PDH/PDL
-  // so the trader can see the developing candidates. This does NOT loosen SETUP or CONFIRMED.
-  const nearPdh = Number.isFinite(pdh) && pdhDistance <= 0.01; const nearPdl = Number.isFinite(pdl) && pdlDistance <= 0.01;
+  // WATCH is deliberately broader (2%) so the dashboard does not go blank.
+  // This only creates a watchlist candidate; it can never become CONFIRMED without PDH/PDL confirmation above.
+  const nearPdh = Number.isFinite(pdh) && pdhDistance <= 0.02;
+  const nearPdl = Number.isFinite(pdl) && pdlDistance <= 0.02;
+  const buyWatch = nearPdh && emaBull;
+  const sellWatch = nearPdl && emaBear;
+
   let status: ScanRow['status'] = 'NO TRADE'; let setup = '—'; let reason = 'No current PDH/PDL Prime Technical setup';
   let entry: number | null = null; let sl: number | null = null; let target: number | null = null; let signalTime: string | null = null;
 
@@ -132,9 +130,10 @@ function rowFromCandles(symbol: string, candles: Candle[], daily?: DailyQuote): 
   } else if (bearishContinuationSetup) {
     setup = 'SELL CONTINUATION SETUP'; status = 'SETUP'; entry = livePrice; sl = Math.max(latest[2], ema20, pdl);
     reason = `PDL already broken + 20 EMA pullback + bearish continuation + ${latestVol.toFixed(1)}X ${volumeLabel(latestVol)}; confirmation pending`; signalTime = latest[0];
-  } else if (nearPdh || nearPdl) {
-    status = 'WATCH'; setup = nearPdh && nearPdl ? 'PDH/PDL WATCH' : nearPdh ? 'PDH WATCH' : 'PDL WATCH';
-    reason = nearPdh ? `Price ${liveAbovePdh ? 'above' : 'near/below'} PDH; waiting for PDH breakout + follow-through` : `Price ${liveBelowPdl ? 'below' : 'near/above'} PDL; waiting for PDL breakdown + follow-through`;
+  } else if (buyWatch || sellWatch) {
+    status = 'WATCH';
+    setup = buyWatch && sellWatch ? 'PDH/PDL WATCH' : buyWatch ? 'PDH BUY WATCH' : 'PDL SELL WATCH';
+    reason = buyWatch ? `Near PDH with price above/rising 20 EMA; waiting for PDH breakout + follow-through` : `Near PDL with price below/falling 20 EMA; waiting for PDL breakdown + follow-through`;
   }
 
   return { symbol, ltp: livePrice, change, volumeX: latestVol, ema: livePrice >= ema20 ? 'BULLISH' : 'BEARISH', level, setup, status, entry, sl, target, reason, signalTime };
